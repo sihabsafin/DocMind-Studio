@@ -9,6 +9,7 @@ youtube-transcript-api version compatibility:
 Strategy: probe available methods at runtime, never assume.
 """
 
+import os
 import re
 from typing import Optional, Tuple
 
@@ -71,37 +72,73 @@ def _parse_entries(transcript_data) -> Tuple[list, list]:
     return formatted_lines, raw_lines
 
 
+def _build_ytt_instance():
+    """
+    Build a YouTubeTranscriptApi instance.
+    If WEBSHARE_USERNAME + WEBSHARE_PASSWORD are set in env/secrets,
+    uses Webshare rotating residential proxies (required for cloud deployments).
+    Otherwise falls back to direct connection (works locally).
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    proxy_user = os.environ.get("WEBSHARE_USERNAME", "")
+    proxy_pass = os.environ.get("WEBSHARE_PASSWORD", "")
+
+    # Try Streamlit secrets too
+    if not proxy_user:
+        try:
+            import streamlit as st
+            proxy_user = st.secrets.get("WEBSHARE_USERNAME", "")
+            proxy_pass = st.secrets.get("WEBSHARE_PASSWORD", "")
+        except Exception:
+            pass
+
+    if proxy_user and proxy_pass:
+        try:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            return YouTubeTranscriptApi(
+                proxy_config=WebshareProxyConfig(
+                    proxy_username=proxy_user,
+                    proxy_password=proxy_pass,
+                )
+            ), True  # (instance, using_proxy)
+        except ImportError:
+            pass  # older version, fall through to direct
+
+    return YouTubeTranscriptApi(), False
+
+
 def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
     """
     Fetch transcript — works with youtube-transcript-api v0.x AND v1.x+
+    Supports Webshare proxy for cloud deployments (set WEBSHARE_USERNAME + WEBSHARE_PASSWORD).
     Returns: (success, formatted, raw, error_message)
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
         # ── Detect API version ───────────────────────────────────────────────
-        # v0.x: YouTubeTranscriptApi.get_transcript is a callable class/static method
-        # v1.x: get_transcript does NOT exist as a class method; must instantiate
+        # v0.x: get_transcript is a callable class/static method
+        # v1.x: must instantiate — get_transcript doesn't exist as class method
         has_class_get = callable(getattr(YouTubeTranscriptApi, 'get_transcript', None))
 
         transcript_data = None
         last_error = ""
+        using_proxy = False
 
         # ════════════════════════════════════════════════
-        # NEW API  (v1.0+)  — instantiate, then call .fetch()
+        # NEW API  (v1.0+)  — instantiate, then .fetch()
         # ════════════════════════════════════════════════
         if not has_class_get:
             try:
-                ytt = YouTubeTranscriptApi()
+                ytt, using_proxy = _build_ytt_instance()
             except Exception as e:
                 return False, "", "", f"Could not initialize YouTubeTranscriptApi: {e}"
 
-            # Probe what instance methods actually exist
             has_fetch            = callable(getattr(ytt, 'fetch', None))
             has_list             = callable(getattr(ytt, 'list', None))
             has_list_transcripts = callable(getattr(ytt, 'list_transcripts', None))
 
-            # Attempt 1 — fetch() with English language preference
             if has_fetch:
                 for lang_args in [{'languages': ['en', 'en-US', 'en-GB']}, {}]:
                     try:
@@ -111,7 +148,6 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
                     except Exception as e:
                         last_error = str(e)
 
-            # Attempt 2 — list() → pick best → fetch()
             if transcript_data is None:
                 list_fn = (ytt.list if has_list
                            else ytt.list_transcripts if has_list_transcripts
@@ -163,7 +199,6 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
                 except Exception as e:
                     last_error = str(e)
 
-        # ── Parse result ─────────────────────────────────────────────────────
         if not transcript_data:
             return _transcript_error(last_error or "No transcript data returned")
 
@@ -215,11 +250,20 @@ def _transcript_error(err: str) -> Tuple[bool, str, str, str]:
             "⚠️ YouTube is rate-limiting requests. "
             "Please wait 30–60 seconds and try again."
         )
-    elif "ip" in e and ("block" in e or "ban" in e):
+    elif any(k in e for k in ["ip", "request", "blocked", "requestblocked", "ipblocked"]):
         msg = (
-            "⚠️ YouTube has blocked this server's IP address.\n\n"
-            "This sometimes happens on cloud platforms. "
-            "Try re-deploying or switching to a different hosting provider."
+            "YouTube is blocking transcript requests from this server's IP address.\n\n"
+            "This is a known limitation with ALL cloud platforms — Streamlit Cloud, AWS, GCP, Azure. "
+            "YouTube blocks their entire IP ranges at the network level.\n\n"
+            "Fix 1 — Run locally (free, works immediately):\n"
+            "  streamlit run app.py on your own machine bypasses this entirely.\n\n"
+            "Fix 2 — Add a Webshare residential proxy (for cloud deployment):\n"
+            "  1. Sign up at webshare.io and purchase a Residential proxy plan (~$3/mo)\n"
+            "  2. Add to .streamlit/secrets.toml:\n"
+            "     WEBSHARE_USERNAME = \'your-username\'\n"
+            "     WEBSHARE_PASSWORD = \'your-password\'\n"
+            "  3. Redeploy — DocMind detects the credentials and routes all transcript "
+            "requests through Webshare automatically."
         )
     else:
         msg = (
