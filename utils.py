@@ -5,7 +5,7 @@ YouTube URL validation, transcript extraction, text processing
 youtube-transcript-api version compatibility:
   v0.x  → YouTubeTranscriptApi.get_transcript(id)       [class method]
   v1.x+ → YouTubeTranscriptApi().fetch(id)               [instance method]
-  
+
 Strategy: probe available methods at runtime, never assume.
 """
 
@@ -54,10 +54,12 @@ def _parse_entries(transcript_data) -> Tuple[list, list]:
                 text = str(entry.text).strip()
                 start = float(entry.start)
             else:
-                # Last resort: try converting to dict
-                d = dict(entry)
-                text = str(d.get('text', '')).strip()
-                start = float(d.get('start', 0))
+                try:
+                    d = dict(entry)
+                    text = str(d.get('text', '')).strip()
+                    start = float(d.get('start', 0))
+                except Exception:
+                    continue
 
             if not text:
                 continue
@@ -77,40 +79,31 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
-        # ── Probe which API shape we have ────────────────────────────────────
-        # v1.x: class has NO 'get_transcript' or 'list_transcripts' class methods
-        #        → must instantiate: ytt = YouTubeTranscriptApi()
-        #        → then call: ytt.fetch(video_id)  or  ytt.list(video_id)
-        # v0.x: class HAS 'get_transcript' as a callable class/static method
-        
+        # ── Detect API version ───────────────────────────────────────────────
+        # v0.x: YouTubeTranscriptApi.get_transcript is a callable class/static method
+        # v1.x: get_transcript does NOT exist as a class method; must instantiate
         has_class_get = callable(getattr(YouTubeTranscriptApi, 'get_transcript', None))
-        
+
         transcript_data = None
         last_error = ""
 
+        # ════════════════════════════════════════════════
+        # NEW API  (v1.0+)  — instantiate, then call .fetch()
+        # ════════════════════════════════════════════════
         if not has_class_get:
-            # ════════════════════════════════════════
-            # NEW API  (v1.0+)
-            # YouTubeTranscriptApi() must be instantiated
-            # Methods: .fetch(video_id, languages=[...])
-            #          .list(video_id)  ← NOT list_transcripts
-            # ════════════════════════════════════════
             try:
                 ytt = YouTubeTranscriptApi()
             except Exception as e:
                 return False, "", "", f"Could not initialize YouTubeTranscriptApi: {e}"
 
-            # Probe instance methods
-            has_fetch = callable(getattr(ytt, 'fetch', None))
-            has_list  = callable(getattr(ytt, 'list', None))
+            # Probe what instance methods actually exist
+            has_fetch            = callable(getattr(ytt, 'fetch', None))
+            has_list             = callable(getattr(ytt, 'list', None))
             has_list_transcripts = callable(getattr(ytt, 'list_transcripts', None))
 
-            # Attempt 1: fetch() with language preference
+            # Attempt 1 — fetch() with English language preference
             if has_fetch:
-                for lang_args in [
-                    {'languages': ['en', 'en-US', 'en-GB']},
-                    {},  # no language filter
-                ]:
+                for lang_args in [{'languages': ['en', 'en-US', 'en-GB']}, {}]:
                     try:
                         transcript_data = ytt.fetch(video_id, **lang_args)
                         if transcript_data:
@@ -118,19 +111,15 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
                     except Exception as e:
                         last_error = str(e)
 
-            # Attempt 2: list() → pick best → fetch()
+            # Attempt 2 — list() → pick best → fetch()
             if transcript_data is None:
-                list_fn = None
-                if has_list:
-                    list_fn = ytt.list
-                elif has_list_transcripts:
-                    list_fn = ytt.list_transcripts
-
+                list_fn = (ytt.list if has_list
+                           else ytt.list_transcripts if has_list_transcripts
+                           else None)
                 if list_fn:
                     try:
                         tlist = list(list_fn(video_id))
                         picked = None
-                        # Prefer manual over auto-generated
                         for t in tlist:
                             if hasattr(t, 'is_generated') and not t.is_generated:
                                 picked = t
@@ -142,13 +131,10 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
                     except Exception as e:
                         last_error = str(e)
 
+        # ════════════════════════════════════════════════
+        # OLD API  (v0.x)  — class methods
+        # ════════════════════════════════════════════════
         else:
-            # ════════════════════════════════════════
-            # OLD API  (v0.x)
-            # YouTubeTranscriptApi.get_transcript() is a class method
-            # ════════════════════════════════════════
-
-            # Attempt 1: with language preference
             try:
                 transcript_data = YouTubeTranscriptApi.get_transcript(
                     video_id, languages=['en', 'en-US', 'en-GB', 'a.en']
@@ -156,14 +142,12 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
             except Exception as e:
                 last_error = str(e)
 
-            # Attempt 2: no language filter
             if transcript_data is None:
                 try:
                     transcript_data = YouTubeTranscriptApi.get_transcript(video_id)
                 except Exception as e:
                     last_error = str(e)
 
-            # Attempt 3: list_transcripts → pick best
             if transcript_data is None:
                 try:
                     tlist = list(YouTubeTranscriptApi.list_transcripts(video_id))
@@ -179,7 +163,7 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
                 except Exception as e:
                     last_error = str(e)
 
-        # ── Parse result ──────────────────────────────────────────────────────
+        # ── Parse result ─────────────────────────────────────────────────────
         if not transcript_data:
             return _transcript_error(last_error or "No transcript data returned")
 
@@ -197,30 +181,56 @@ def fetch_transcript(video_id: str) -> Tuple[bool, str, str, str]:
 
 
 def _transcript_error(err: str) -> Tuple[bool, str, str, str]:
-    """Convert raw exception message to a user-friendly string."""
+    """Convert raw exception message to a user-friendly error with actionable advice."""
     e = err.lower()
+
     if any(k in e for k in [
         "no transcript", "could not retrieve", "notranscript",
-        "no captions", "subtitles are disabled", "transcript list"
+        "no captions", "subtitles are disabled", "transcript list",
+        "no element", "could not find"
     ]):
         msg = (
-            "No captions found for this video. "
-            "Please try a video with auto-generated or manual captions enabled."
+            "⚠️ This video has no captions available.\n\n"
+            "YouTube requires a video to have either auto-generated or manual captions "
+            "for transcript extraction to work.\n\n"
+            "✅ Try videos from these types of channels — they almost always have captions:\n"
+            "• Tech tutorials (e.g. Fireship, Traversy Media, NetworkChuck)\n"
+            "• Educational (e.g. Khan Academy, Kurzgesagt, TED)\n"
+            "• Business/AI (e.g. Y Combinator, Lex Fridman, MKBHD)\n\n"
+            "💡 Tip: Open the video on YouTube → click CC button. "
+            "If it's greyed out, the video has no captions."
         )
     elif "disabled" in e or "transcriptsdisabled" in e:
-        msg = "Captions are disabled for this video. Please try another video."
+        msg = (
+            "⚠️ The video owner has disabled captions for this video.\n\n"
+            "Please try a different video. Most educational and tech videos have captions enabled."
+        )
     elif any(k in e for k in ["unavailable", "private", "not available", "video unavailable"]):
-        msg = "This video is private or unavailable. Please check the URL."
+        msg = (
+            "⚠️ This video is private or unavailable.\n\n"
+            "Please check the URL and make sure the video is publicly accessible."
+        )
     elif "too many requests" in e or "429" in err:
-        msg = "YouTube is rate-limiting requests. Please wait a moment and try again."
+        msg = (
+            "⚠️ YouTube is rate-limiting requests. "
+            "Please wait 30–60 seconds and try again."
+        )
     elif "ip" in e and ("block" in e or "ban" in e):
-        msg = "YouTube blocked this server's IP. Try a different video or re-deploy."
+        msg = (
+            "⚠️ YouTube has blocked this server's IP address.\n\n"
+            "This sometimes happens on cloud platforms. "
+            "Try re-deploying or switching to a different hosting provider."
+        )
     else:
-        msg = f"Could not fetch transcript. Try a different YouTube video. (Detail: {err[:200]})"
+        msg = (
+            f"⚠️ Could not fetch transcript.\n\n"
+            f"Please try a different YouTube video. Most educational, tech, and tutorial "
+            f"videos work well.\n\nDetail: {err[:200]}"
+        )
     return False, "", "", msg
 
 
-# ── Text helpers ──────────────────────────────────────────────────────────────
+# ── Text helpers ─────────────────────────────────────────────────────────────
 
 def chunk_transcript(raw_transcript: str, max_words: int = 7000) -> str:
     words = raw_transcript.split()
@@ -235,7 +245,10 @@ def chunk_transcript(raw_transcript: str, max_words: int = 7000) -> str:
 
 
 def parse_blog_metadata(blog_content: str) -> dict:
-    meta = {"seo_title": "", "meta_description": "", "primary_keyword": "", "secondary_keywords": []}
+    meta = {
+        "seo_title": "", "meta_description": "",
+        "primary_keyword": "", "secondary_keywords": []
+    }
     for line in blog_content.split('\n'):
         ll = line.lower()
         if ':' not in line:
