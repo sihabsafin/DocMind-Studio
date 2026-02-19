@@ -302,15 +302,70 @@ with st.sidebar:
 if st.session_state.stage == "input":
 
     if st.session_state.error:
+        # Convert newlines to <br> and format nicely
+        err_html = st.session_state.error.replace("\n\n", "<br><br>").replace("\n", "<br>")
+        
+        # Detect if it's a no-captions error to show extra help panel
+        is_no_captions = any(k in st.session_state.error.lower() for k in [
+            "no captions", "no transcript", "has no captions"
+        ])
+        
+        extra_panel = ""
+        if is_no_captions:
+            extra_panel = """
+<div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.25);
+     border-radius:10px;padding:16px 20px;margin-top:14px;">
+  <div style="font-size:13px;font-weight:600;color:#06b6d4;margin-bottom:10px;">
+    🎬 Videos that work great with DocMind Studio:
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;">
+    <a href="https://www.youtube.com/@Fireship" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      🔥 Fireship
+    </a>
+    <a href="https://www.youtube.com/@lexfridman" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      🎙 Lex Fridman
+    </a>
+    <a href="https://www.youtube.com/@NetworkChuck" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      🌐 NetworkChuck
+    </a>
+    <a href="https://www.youtube.com/@mkbhd" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      📱 MKBHD
+    </a>
+    <a href="https://www.youtube.com/@Kurzgesagt" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      🌍 Kurzgesagt
+    </a>
+    <a href="https://www.youtube.com/@TED" target="_blank"
+       style="background:#1a2332;border:1px solid rgba(148,163,184,0.2);border-radius:6px;
+              padding:5px 12px;font-size:12px;color:#cbd5e1;text-decoration:none;">
+      💡 TED
+    </a>
+  </div>
+  <div style="font-size:11px;color:#64748b;margin-top:10px;">
+    💡 Tip: On YouTube, click the <strong style="color:#94a3b8;">CC</strong> button — 
+    if it's available, DocMind can process it.
+  </div>
+</div>"""
+
         st.markdown(f"""
 <div style="background:rgba(26,35,50,1);border:1px solid rgba(148,163,184,0.12);
      border-left:3px solid #f43f5e;border-radius:12px;padding:20px;margin-bottom:24px;">
-  <div style="font-size:22px;margin-bottom:6px;">⚠️</div>
+  <div style="font-size:22px;margin-bottom:8px;">⚠️</div>
   <div style="font-family:Inter,sans-serif;font-size:15px;font-weight:600;
-              color:#f1f5f9;margin-bottom:6px;">Something went wrong</div>
-  <div style="font-family:Inter,sans-serif;font-size:13px;color:#cbd5e1;line-height:1.6;">
-    {st.session_state.error}
+              color:#f1f5f9;margin-bottom:10px;">Could Not Process This Video</div>
+  <div style="font-family:Inter,sans-serif;font-size:13px;color:#cbd5e1;line-height:1.7;">
+    {err_html}
   </div>
+  {extra_panel}
 </div>
 """, unsafe_allow_html=True)
 
