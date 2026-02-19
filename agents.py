@@ -1,216 +1,79 @@
 """
-DocMind Studio — AI Agents Module
-5 specialized agents using CrewAI + Groq
+DocMind Studio — AI Agents Pipeline
+5 specialized agents using Groq API directly (no CrewAI OpenAI dependency)
+
+Why direct Groq instead of CrewAI?
+CrewAI >=0.22 internally imports OpenAI and requires OPENAI_API_KEY even when
+you pass a custom LLM. To avoid this, we call the Groq API directly via the
+groq Python SDK — same multi-agent logic, zero OpenAI dependency.
 """
 
-from crewai import Agent, Task, Crew, Process
-from langchain_groq import ChatGroq
+import os
 import time
+from groq import Groq
 
 
-def get_llm(api_key: str, temperature: float = 0.6, max_tokens: int = 2000):
-    """Initialize Groq LLM"""
-    return ChatGroq(
-        api_key=api_key,
-        model_name="llama-3.3-70b-versatile",
+# ── Dummy env var to silence any CrewAI/LangChain OpenAI checks ─────────────
+os.environ.setdefault("OPENAI_API_KEY", "sk-dummy-not-used-docmind")
+
+
+def _call_groq(
+    client: Groq,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 2500,
+    temperature: float = 0.65,
+) -> str:
+    """Single Groq API call — returns response text."""
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
         temperature=temperature,
         max_tokens=max_tokens,
     )
+    return response.choices[0].message.content.strip()
 
 
-def create_agents(llm):
-    """Create all 5 DocMind agents"""
+# ── Agent system prompts ──────────────────────────────────────────────────────
 
-    research_analyst = Agent(
-        role="Content Research Analyst",
-        goal="Extract and analyze core concepts, key arguments, and structure from video transcript",
-        backstory="""You are an expert content analyst specializing in breaking down video content. 
-        You identify main topics, key concepts, supporting evidence, and suggest logical blog structure. 
-        You're thorough, analytical, and skilled at spotting the most valuable insights.""",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
+AGENT_SYSTEMS = {
+    "Research Analyst": """You are an expert content analyst specializing in breaking down video transcripts.
+Your job is to extract the most valuable insights, identify key themes, core arguments, 
+supporting evidence, and suggest a logical structure for a blog post.
+Be thorough, analytical, and focus on what would matter most to readers.
+Return a clear, structured analysis.""",
 
-    content_strategist = Agent(
-        role="Blog Structure Architect",
-        goal="Create a compelling, logical blog outline with perfect flow from research findings",
-        backstory="""You are a seasoned content strategist who transforms raw research into beautiful 
-        blog structures. You know exactly how to hook readers, organize information for maximum impact, 
-        and create outlines that writers can turn into excellent long-form content.""",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
+    "Content Strategist": """You are a seasoned content strategist who transforms research into compelling blog structures.
+You know how to hook readers, organize information for maximum impact, and design outlines
+that guide writers to produce excellent long-form content.
+Return a complete, well-structured markdown blog outline with H2 and H3 headings.""",
 
-    seo_optimizer = Agent(
-        role="SEO Optimization Specialist",
-        goal="Generate SEO-optimized title, meta description, and keyword strategy to maximize discoverability",
-        backstory="""You are an SEO expert who has helped hundreds of blogs achieve top Google rankings. 
-        You understand search intent, keyword optimization, and how to craft titles that both rank well 
-        and compel clicks. You know the exact character limits and best practices.""",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
+    "SEO Optimizer": """You are an SEO expert with a track record of helping blogs rank on Google's first page.
+You understand search intent, keyword optimization, and how to craft titles that rank AND get clicks.
+You know exact character limits and best practices.
+Return clearly labeled SEO metadata.""",
 
-    blog_writer = Agent(
-        role="Professional Blog Content Writer",
-        goal="Write an engaging, human-quality, full blog post based on the outline and SEO strategy",
-        backstory="""You are a professional content writer with years of experience creating blog posts 
-        that rank, engage, and convert. You adapt your tone perfectly to different styles, write with 
-        clarity and depth, and always include strong calls to action. Your writing feels human, not AI.""",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
+    "Blog Writer": """You are a professional blog writer who creates engaging, human-quality content.
+You adapt your tone perfectly, write with clarity and depth, and always include strong calls to action.
+Your writing feels genuinely human — not like AI-generated filler.
+Return a complete, well-formatted blog post in Markdown.""",
 
-    quality_reviewer = Agent(
-        role="Editorial Quality Reviewer",
-        goal="Polish the blog post to publication standards — fix errors, improve clarity, ensure consistency",
-        backstory="""You are a seasoned editor with an eye for detail and a commitment to quality. 
-        You catch grammatical errors, eliminate redundancy, improve sentence variety, and ensure the 
-        final piece is publication-ready. You respect the writer's voice while elevating the content.""",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
+    "Quality Reviewer": """You are a seasoned editor committed to publication-quality content.
+You catch grammatical errors, eliminate redundancy, improve sentence variety, 
+ensure consistent tone, and make every word count.
+Return the COMPLETE polished blog post — do not summarize or shorten it.""",
+}
 
-    return {
-        "research_analyst": research_analyst,
-        "content_strategist": content_strategist,
-        "seo_optimizer": seo_optimizer,
-        "blog_writer": blog_writer,
-        "quality_reviewer": quality_reviewer,
-    }
-
-
-def create_tasks(agents, transcript: str, tone: str, word_count: int, seo_mode: str):
-    """Create tasks for each agent"""
-
-    tone_instructions = {
-        "Professional": "Write in a formal, authoritative, data-driven tone. Use professional vocabulary and cite logical evidence.",
-        "Casual": "Write in a conversational, friendly, and relatable tone. Use simple language, contractions, and a warm approach.",
-        "Educational": "Write in a clear, structured, tutorial-style tone. Break concepts down step by step for easy understanding.",
-        "Storytelling": "Write in a narrative-driven, engaging, and emotional tone. Use stories, analogies, and vivid examples.",
-        "Technical": "Write with precision, technical detail, and appropriate jargon. Include specifications and technical depth.",
-    }
-
-    tone_desc = tone_instructions.get(tone, tone_instructions["Professional"])
-
-    research_task = Task(
-        description=f"""Analyze this YouTube video transcript and extract:
-        1. Main topics (3-5 primary themes)
-        2. Key concepts and arguments with supporting evidence
-        3. Important points worth highlighting in a blog post
-        4. Suggested blog sections based on content flow
-        5. Any data points, statistics, or examples mentioned
-        
-        Transcript:
-        {transcript[:8000]}
-        
-        Provide a structured analysis that will help create an excellent blog post.""",
-        agent=agents["research_analyst"],
-        expected_output="Structured analysis with main topics, key concepts, arguments, and suggested sections",
-    )
-
-    strategy_task = Task(
-        description=f"""Based on the research analysis, create a compelling blog outline for approximately {word_count} words.
-        
-        Requirements:
-        - Engaging hook in introduction
-        - Logical H2/H3 section hierarchy
-        - Clear transitions between sections
-        - Key takeaways section
-        - Strong conclusion
-        - Call to action at the end
-        - Aim for {word_count} words total
-        
-        Return a complete markdown outline with ## and ### headings.""",
-        agent=agents["content_strategist"],
-        expected_output="Complete blog outline in markdown with H2/H3 structure, introduction hook, and conclusion",
-        context=[research_task],
-    )
-
-    seo_task_desc = f"""Create SEO optimization for this blog post:
-        
-        Required outputs:
-        1. SEO Title (60 characters max, compelling, keyword-rich)
-        2. Meta Description (155 characters max, includes primary keyword, has CTA)
-        3. Primary Keyword (single most important keyword)
-        """
-
-    if seo_mode == "Advanced":
-        seo_task_desc += """
-        4. Secondary Keywords (5-8 related keywords)
-        5. Optimized H2/H3 heading suggestions
-        6. Keyword density recommendations
-        7. Link building opportunities (types of sites to link to)
-        8. Schema markup type recommendation
-        """
-
-    seo_task_desc += "\n\nFormat your response clearly with labeled sections."
-
-    seo_task = Task(
-        description=seo_task_desc,
-        agent=agents["seo_optimizer"],
-        expected_output="SEO title, meta description, primary keyword, and additional SEO metadata",
-        context=[research_task, strategy_task],
-    )
-
-    write_task = Task(
-        description=f"""Write a complete, publication-ready blog post following these specifications:
-        
-        Tone: {tone_desc}
-        Target Length: approximately {word_count} words
-        
-        Requirements:
-        - Follow the outline structure exactly
-        - Use the SEO title and integrate keywords naturally
-        - Write with the specified tone throughout
-        - Include relevant examples and actionable insights
-        - Use bullet points and numbered lists for scannability
-        - Add a strong call-to-action at the end
-        - Make it feel human-written, not AI-generated
-        
-        Format the entire blog post in proper Markdown with:
-        - # for main title
-        - ## for H2 sections
-        - ### for H3 subsections
-        - **bold** for emphasis
-        - Bullet lists and numbered lists where appropriate
-        
-        Include at the very top:
-        **SEO Title:** [the SEO-optimized title]
-        **Meta Description:** [the meta description]
-        **Primary Keyword:** [primary keyword]
-        
-        Then the full blog post content below.""",
-        agent=agents["blog_writer"],
-        expected_output="Complete blog post in Markdown format with SEO metadata at top and full content",
-        context=[research_task, strategy_task, seo_task],
-    )
-
-    review_task = Task(
-        description="""Review and polish the blog post to publication standards:
-        
-        1. Fix any grammatical errors or typos
-        2. Eliminate repetitive phrases or redundant content
-        3. Improve sentence variety and readability
-        4. Ensure tone is consistent throughout
-        5. Verify the call-to-action is strong and clear
-        6. Ensure headings are compelling and descriptive
-        7. Check that the content flows naturally
-        
-        Return the COMPLETE polished blog post in Markdown format.
-        Keep the SEO Title, Meta Description, and Primary Keyword at the top.
-        Do not remove or summarize content — return the full, improved post.""",
-        agent=agents["quality_reviewer"],
-        expected_output="Final polished blog post in Markdown format, publication-ready",
-        context=[write_task],
-    )
-
-    return [research_task, strategy_task, seo_task, write_task, review_task]
+TONE_INSTRUCTIONS = {
+    "Professional":  "Use a formal, authoritative, data-driven tone. Professional vocabulary, logical evidence.",
+    "Casual":        "Use a conversational, friendly, relatable tone. Simple language, contractions, warm approach.",
+    "Educational":   "Use a clear, structured, tutorial-style tone. Break concepts down step by step.",
+    "Storytelling":  "Use a narrative-driven, engaging, emotional tone. Stories, analogies, vivid examples.",
+    "Technical":     "Use precise, technical, jargon-appropriate language. Include specifications and depth.",
+}
 
 
 def run_agent_pipeline(
@@ -222,75 +85,167 @@ def run_agent_pipeline(
     progress_callbacks: dict = None,
 ) -> dict:
     """
-    Run the full multi-agent pipeline.
-    Returns dict with final blog content and metadata.
+    Run the full 5-agent pipeline using Groq directly.
+    Returns dict with blog_content and metadata.
     """
+    client = Groq(api_key=api_key)
 
-    max_tokens_map = {
-        800: 1500,
-        1500: 2500,
-        2500: 4000,
-        4000: 6000,
-    }
+    max_tokens_map = {800: 1500, 1500: 2500, 2500: 4000, 4000: 6000}
     max_tokens = max_tokens_map.get(word_count, 2500)
-
-    llm = get_llm(api_key, temperature=0.6, max_tokens=max_tokens)
-    agents = create_agents(llm)
+    tone_desc = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Professional"])
 
     agent_order = [
-        ("research_analyst", "Research Analyst"),
-        ("content_strategist", "Content Strategist"),
-        ("seo_optimizer", "SEO Optimizer"),
-        ("blog_writer", "Blog Writer"),
-        ("quality_reviewer", "Quality Reviewer"),
+        "Research Analyst",
+        "Content Strategist",
+        "SEO Optimizer",
+        "Blog Writer",
+        "Quality Reviewer",
     ]
 
     results = {}
 
-    for i, (agent_key, agent_name) in enumerate(agent_order):
+    for i, agent_name in enumerate(agent_order):
+
+        # ── Notify UI: agent starting ──────────────────────────────────────
         if progress_callbacks and "on_agent_start" in progress_callbacks:
             progress_callbacks["on_agent_start"](i, agent_name)
 
         start_time = time.time()
+        context = "\n\n".join(
+            f"=== {k} Output ===\n{v}" for k, v in results.items()
+        )
 
-        # Create and run individual task
-        task_list = create_tasks(agents, transcript, tone, word_count, seo_mode)
-        task = task_list[i]
+        # ── Build task prompt for each agent ──────────────────────────────
+        if agent_name == "Research Analyst":
+            user_prompt = f"""Analyze this YouTube video transcript and extract:
+1. Main topics (3–5 primary themes)
+2. Key concepts and arguments with supporting evidence
+3. Important points worth highlighting in a blog post
+4. Suggested blog sections based on content flow
+5. Any data points, statistics, or examples mentioned
 
-        # For sequential tasks, we need context from previous results
-        if i == 0:
-            mini_crew = Crew(
-                agents=[agents[agent_key]],
-                tasks=[task],
-                process=Process.sequential,
-                verbose=False,
-            )
+Transcript:
+{transcript[:7000]}
+
+Provide a structured analysis to help create an excellent blog post."""
+
+        elif agent_name == "Content Strategist":
+            user_prompt = f"""Based on this research analysis, create a compelling blog outline for ~{word_count} words.
+
+Research:
+{results.get('Research Analyst', '')[:3000]}
+
+Requirements:
+- Engaging hook in the introduction
+- Logical H2/H3 section hierarchy
+- Clear transitions between sections
+- Key takeaways section
+- Strong conclusion
+- Call to action
+
+Return a complete markdown outline with ## and ### headings."""
+
+        elif agent_name == "SEO Optimizer":
+            seo_extras = ""
+            if seo_mode == "Advanced":
+                seo_extras = """
+4. Secondary Keywords (5–8 related keywords, comma-separated)
+5. Optimized H2/H3 heading suggestions
+6. Keyword density recommendation (%)
+7. Link building opportunities
+8. Schema markup type"""
+
+            user_prompt = f"""Create SEO optimization based on this content:
+
+Research Summary:
+{results.get('Research Analyst', '')[:2000]}
+
+Blog Outline:
+{results.get('Content Strategist', '')[:1500]}
+
+Required outputs:
+1. SEO Title (60 chars max, compelling, keyword-rich)
+2. Meta Description (155 chars max, includes primary keyword + CTA)
+3. Primary Keyword (single most important keyword){seo_extras}
+
+Format with clear labels like:
+SEO Title: ...
+Meta Description: ...
+Primary Keyword: ..."""
+
+        elif agent_name == "Blog Writer":
+            user_prompt = f"""Write a complete, publication-ready blog post.
+
+Tone: {tone_desc}
+Target Length: approximately {word_count} words
+
+Blog Outline:
+{results.get('Content Strategist', '')[:2000]}
+
+SEO Guidelines:
+{results.get('SEO Optimizer', '')[:1000]}
+
+Requirements:
+- Follow the outline structure
+- Integrate keywords naturally (don't keyword-stuff)
+- Write with the specified tone throughout
+- Include relevant examples and actionable insights
+- Use bullet points and numbered lists for scannability
+- End with a strong call-to-action
+- Write naturally — avoid sounding like AI
+
+Format in Markdown (# H1, ## H2, ### H3, **bold**, bullet lists).
+
+Start with these metadata lines at the very top:
+**SEO Title:** [title here]
+**Meta Description:** [meta here]
+**Primary Keyword:** [keyword here]
+
+Then write the full blog post below."""
+
+        elif agent_name == "Quality Reviewer":
+            user_prompt = f"""Review and polish this blog post to publication standards:
+
+{results.get('Blog Writer', '')}
+
+Tasks:
+1. Fix grammatical errors and typos
+2. Eliminate repetitive phrases and redundant content
+3. Improve sentence variety and readability
+4. Ensure tone is consistent throughout
+5. Strengthen the call-to-action if weak
+6. Make headings more compelling if needed
+7. Ensure natural content flow
+
+IMPORTANT: Return the COMPLETE polished blog post in Markdown.
+Keep SEO Title, Meta Description, and Primary Keyword at the top.
+Do NOT shorten, summarize, or remove content."""
+
         else:
-            # Pass previous results as context in the task description
-            context_summary = "\n\n".join(
-                [f"Previous agent output:\n{v}" for v in results.values()]
-            )
-            task.description = task.description + f"\n\nContext from previous agents:\n{context_summary[:3000]}"
-            mini_crew = Crew(
-                agents=[agents[agent_key]],
-                tasks=[task],
-                process=Process.sequential,
-                verbose=False,
-            )
+            user_prompt = f"Process the following:\n\n{context}"
 
-        result = mini_crew.kickoff()
+        # ── Call Groq ──────────────────────────────────────────────────────
+        output = _call_groq(
+            client=client,
+            system_prompt=AGENT_SYSTEMS[agent_name],
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=0.65,
+        )
+        results[agent_name] = output
+
         duration = round(time.time() - start_time, 1)
-        results[agent_key] = str(result)
 
+        # ── Notify UI: agent complete ──────────────────────────────────────
         if progress_callbacks and "on_agent_complete" in progress_callbacks:
             progress_callbacks["on_agent_complete"](i, agent_name, duration)
 
-    final_blog = results.get("quality_reviewer", results.get("blog_writer", ""))
+    final_blog = results.get("Quality Reviewer", results.get("Blog Writer", ""))
 
     return {
         "blog_content": final_blog,
-        "research": results.get("research_analyst", ""),
-        "outline": results.get("content_strategist", ""),
-        "seo": results.get("seo_optimizer", ""),
-        "word_count": len(final_blog.split()),
+        "research":     results.get("Research Analyst", ""),
+        "outline":      results.get("Content Strategist", ""),
+        "seo":          results.get("SEO Optimizer", ""),
+        "word_count":   len(final_blog.split()),
     }
