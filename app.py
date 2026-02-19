@@ -557,8 +557,45 @@ if st.session_state.stage == "input":
         err_html       = st.session_state.error.replace("\n\n","<br><br>").replace("\n","<br>")
         is_no_captions = any(k in st.session_state.error.lower() for k in
                              ["no captions","no transcript","has no captions"])
+        is_ip_block = any(k in st.session_state.error.lower() for k in
+                          ["blocking transcript","ip address","webshare","cloud platform","run locally"])
         extra_panel = ""
-        if is_no_captions:
+        if is_ip_block:
+            extra_panel = """
+<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);
+     border-radius:10px;padding:18px 20px;margin-top:14px;">
+  <div style="font-size:13px;font-weight:600;color:#f59e0b;margin-bottom:12px;">
+    Two ways to fix this:
+  </div>
+  <div style="margin-bottom:14px;">
+    <div style="font-size:13px;font-weight:600;color:#f1f5f9;margin-bottom:4px;">
+      Option 1 — Run locally (free, works right now)
+    </div>
+    <div style="background:#0f1929;border-radius:8px;padding:10px 14px;
+         font-family:'JetBrains Mono',monospace;font-size:12px;color:#06b6d4;margin-top:6px;">
+      streamlit run app.py
+    </div>
+    <div style="font-size:12px;color:#64748b;margin-top:6px;">
+      Your local machine has a residential IP — YouTube won't block it.
+    </div>
+  </div>
+  <div>
+    <div style="font-size:13px;font-weight:600;color:#f1f5f9;margin-bottom:4px;">
+      Option 2 — Add Webshare residential proxy (~$3/mo)
+    </div>
+    <div style="font-size:12px;color:#94a3b8;line-height:1.7;margin-top:4px;">
+      1. Sign up at <strong style="color:#f59e0b;">webshare.io</strong> → purchase a <strong>Residential</strong> plan<br>
+      2. Add to <code style="background:#1a2332;padding:2px 6px;border-radius:4px;">.streamlit/secrets.toml</code>:<br>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#06b6d4;
+            display:block;background:#0f1929;padding:8px 12px;border-radius:6px;margin:6px 0;">
+        WEBSHARE_USERNAME = "your-username"<br>
+        WEBSHARE_PASSWORD = "your-password"
+      </span>
+      3. Redeploy — DocMind detects credentials and routes all requests through Webshare automatically.
+    </div>
+  </div>
+</div>"""
+        elif is_no_captions:
             extra_panel = """
 <div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.25);
      border-radius:10px;padding:16px 20px;margin-top:14px;">
